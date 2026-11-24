@@ -1,0 +1,168 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Demo de AWS Step Functions con Lambda, Choice, Retry y Catch.
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 10
+    MemorySize: 128
+
+Resources:
+  ValidateOrderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/validate_order/
+      Handler: app.lambda_handler
+      Role: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/LabRole
+
+  ProcessOrderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/process_order/
+      Handler: app.lambda_handler
+      Role: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/LabRole
+
+  NotifyOrderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/notify_order/
+      Handler: app.lambda_handler
+      Role: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/LabRole
+
+  OrderStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: step-functions-lambda-demo
+      Type: STANDARD
+      Role: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/LabRole
+      Definition:
+        StartAt: ValidarPedido
+        States:
+          ValidarPedido:
+            Type: Task
+            Resource: "${ValidateOrderFunctionArn}"
+            ResultPath: "$.validation"
+            Next: PedidoValido
+            Retry:
+              - ErrorEquals:
+                  - Lambda.ServiceException
+                  - Lambda.AWSLambdaException
+                  - Lambda.SdkClientException
+                IntervalSeconds: 2
+                MaxAttempts: 2
+                BackoffRate: 2
+            Catch:
+              - ErrorEquals:
+                  - States.ALL
+                ResultPath: "$.error"
+                Next: NotificarError
+
+          PedidoValido:
+            Type: Choice
+            Choices:
+              - Variable: "$.validation.valid"
+                BooleanEquals: true
+                Next: ProcesarPedido
+            Default: PedidoInvalido
+
+          PedidoInvalido:
+            Type: Pass
+            Result:
+              status: REJECTED
+              reason: "El pedido no superó la validación"
+            ResultPath: "$.result"
+            Next: Fin
+
+          ProcesarPedido:
+            Type: Task
+            Resource: "${ProcessOrderFunctionArn}"
+            ResultPath: "$.processing"
+            Next: ResultadoProcesamiento
+            Retry:
+              - ErrorEquals:
+                  - States.TaskFailed
+                  - Lambda.ServiceException
+                  - Lambda.AWSLambdaException
+                  - Lambda.SdkClientException
+                IntervalSeconds: 1
+                MaxAttempts: 3
+                BackoffRate: 2
+            Catch:
+              - ErrorEquals:
+                  - States.ALL
+                ResultPath: "$.error"
+                Next: NotificarError
+
+          ResultadoProcesamiento:
+            Type: Choice
+            Choices:
+              - Variable: "$.processing.status"
+                StringEquals: COMPLETED
+                Next: NotificarExito
+            Default: NotificarError
+
+          NotificarExito:
+            Type: Task
+            Resource: "${NotifyOrderFunctionArn}"
+            Parameters:
+              notificationType: SUCCESS
+              order.$: "$"
+            ResultPath: "$.notification"
+            Next: Fin
+            Retry:
+              - ErrorEquals:
+                  - Lambda.ServiceException
+                  - Lambda.AWSLambdaException
+                  - Lambda.SdkClientException
+                IntervalSeconds: 1
+                MaxAttempts: 2
+                BackoffRate: 2
+            Catch:
+              - ErrorEquals:
+                  - States.ALL
+                ResultPath: "$.error"
+                Next: Fin
+
+          NotificarError:
+            Type: Task
+            Resource: "${NotifyOrderFunctionArn}"
+            Parameters:
+              notificationType: ERROR
+              order.$: "$"
+            ResultPath: "$.notification"
+            Next: Fin
+            Retry:
+              - ErrorEquals:
+                  - Lambda.ServiceException
+                  - Lambda.AWSLambdaException
+                  - Lambda.SdkClientException
+                IntervalSeconds: 1
+                MaxAttempts: 2
+                BackoffRate: 2
+            Catch:
+              - ErrorEquals:
+                  - States.ALL
+                ResultPath: "$.notificationError"
+                Next: Fin
+
+          Fin:
+            Type: Succeed
+      DefinitionSubstitutions:
+        ValidateOrderFunctionArn: !GetAtt ValidateOrderFunction.Arn
+        ProcessOrderFunctionArn: !GetAtt ProcessOrderFunction.Arn
+        NotifyOrderFunctionArn: !GetAtt NotifyOrderFunction.Arn
+
+Outputs:
+  StateMachineArn:
+    Description: ARN de la Step Function desplegada
+    Value: !Ref OrderStateMachine
+  ValidateOrderFunctionArn:
+    Description: ARN de la Lambda de validación
+    Value: !GetAtt ValidateOrderFunction.Arn
+  ProcessOrderFunctionArn:
+    Description: ARN de la Lambda de procesamiento
+    Value: !GetAtt ProcessOrderFunction.Arn
+  NotifyOrderFunctionArn:
+    Description: ARN de la Lambda de notificación
+    Value: !GetAtt NotifyOrderFunction.Arn

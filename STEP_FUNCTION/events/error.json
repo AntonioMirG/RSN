@@ -1,0 +1,6 @@
+{
+  "orderId": "ORDER-1003",
+  "customer": "Alan Turing",
+  "amount": 75,
+  "simulateError": true
+}
